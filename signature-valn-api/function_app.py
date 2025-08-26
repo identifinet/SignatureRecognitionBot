@@ -1,193 +1,172 @@
 import azure.functions as func
-import logging
 import json
-import requests
-from typing import Dict, Any
+import logging
+from src.main import app as fastapi_app, process_signature_validation
+from src.models import SignatureValidationRequest, SignatureValidationResponse
+from azure.storage.queue import QueueClient
 import os
-from datetime import datetime
+import httpx
 
-app = func.FunctionApp()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-@app.function_name(name="SignatureValidation")
-@app.route(route="validate")
-def signature_validation(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Azure Function to validate signatures and update Identifi documents
-    """
-    logging.info('Python HTTP trigger function processed a request.')
-    
+# Human-readable error messages for exceptions
+ERROR_MESSAGES = {
+    httpx.HTTPStatusError: {
+        400: "Bad request: The server could not understand the request due to invalid data.",
+        401: "Unauthorized: Invalid API key or authentication credentials.",
+        403: "Forbidden: Access to the resource is restricted.",
+        404: "Not found: The requested resource (e.g., document or smart folder) does not exist.",
+        429: "Too many requests: Rate limit exceeded, please try again later.",
+        500: "Server error: The server encountered an internal error.",
+        "default": "HTTP error occurred while processing the request."
+    },
+    httpx.RequestError: "Network error: Failed to connect to the API endpoint.",
+    httpx.ReadTimeout: "Timeout: The API request took too long to respond.",
+    json.JSONDecodeError: "Invalid queue message: The message format is not valid JSON.",
+    ValueError: "Invalid queue message: The message could not be processed.",
+    Exception: "Unexpected error: An unknown issue occurred during processing."
+}
+
+def get_error_message(exception, status_code=None):
+    """Return a human-readable error message based on exception type and status code."""
+    if isinstance(exception, httpx.HTTPStatusError) and status_code:
+        return ERROR_MESSAGES.get(httpx.HTTPStatusError, {}).get(status_code, ERROR_MESSAGES[httpx.HTTPStatusError]["default"])
+    return ERROR_MESSAGES.get(type(exception), ERROR_MESSAGES[Exception])
+
+# Initialize Azure Function App
+function_app = func.FunctionApp()
+
+# HTTP-triggered Azure Function
+@function_app.function_name(name="HttpTrigger")
+@function_app.route(route="{*route}", methods=["GET", "POST"], auth_level=func.AuthLevel.ANONYMOUS)
+async def http_trigger(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        # Get request body
-        req_body = req.get_json()
-        
-        # Extract document information
-        document_id = req_body.get('document_id')
-        document_url = req_body.get('document_url')
-        document_type = req_body.get('document_type')
-        
-        if not all([document_id, document_url, document_type]):
-            return func.HttpResponse(
-                json.dumps({"error": "Missing required fields: document_id, document_url, document_type"}),
-                status_code=400,
-                mimetype="application/json"
-            )
-        
-        # Process signature validation
-        validation_result = process_signature_validation(document_id, document_url, document_type)
-        
-        # Update Identifi document attributes
-        update_result = update_identifi_document(document_id, validation_result)
-        
-        return func.HttpResponse(
-            json.dumps({
-                "status": "success",
-                "document_id": document_id,
-                "validation_result": validation_result,
-                "update_result": update_result,
-                "timestamp": datetime.utcnow().isoformat()
-            }),
-            status_code=200,
-            mimetype="application/json"
-        )
-        
-    except Exception as e:
-        logging.error(f"Error processing request: {str(e)}")
-        return func.HttpResponse(
-            json.dumps({"error": f"Internal server error: {str(e)}"}),
-            status_code=500,
-            mimetype="application/json"
-        )
-
-def process_signature_validation(document_id: str, document_url: str, document_type: str) -> Dict[str, Any]:
-    """
-    Process signature validation for a document
-    """
-    # Mock validation logic - replace with actual signature validation
-    validation_result = {
-        "signatures_found": 2,
-        "signatures_validated": 2,
-        "confidence_score": 0.85,
-        "validation_status": "valid",
-        "processing_time": "1.2s"
-    }
-    
-    logging.info(f"Signature validation completed for document {document_id}")
-    return validation_result
-
-def update_identifi_document(document_id: str, validation_result: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Update Identifi document with validation results
-    """
-    try:
-        # Identifi API endpoint (replace with actual endpoint)
-        identifi_api_url = os.getenv("IDENTIFI_API_URL", "https://api.identifi.com")
-        api_key = os.getenv("IDENTIFI_API_KEY")
-        
-        if not api_key:
-            logging.warning("IDENTIFI_API_KEY not configured")
-            return {"status": "skipped", "reason": "API key not configured"}
-        
-        # Prepare update payload
-        update_payload = {
-            "document_id": document_id,
-            "attributes": {
-                "signature_validation_status": validation_result["validation_status"],
-                "signature_confidence_score": validation_result["confidence_score"],
-                "signatures_found": validation_result["signatures_found"],
-                "signatures_validated": validation_result["signatures_validated"],
-                "last_validation_date": datetime.utcnow().isoformat()
-            },
-            "notes": f"Signature validation completed: {validation_result['validation_status']} with {validation_result['confidence_score']} confidence"
-        }
-        
-        # Make API call to Identifi
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(
-            f"{identifi_api_url}/documents/{document_id}/update",
-            json=update_payload,
-            headers=headers,
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            logging.info(f"Successfully updated Identifi document {document_id}")
-            return {"status": "success", "response": response.json()}
-        else:
-            logging.error(f"Failed to update Identifi document {document_id}: {response.status_code}")
-            return {"status": "failed", "response_code": response.status_code, "response": response.text}
-            
-    except Exception as e:
-        logging.error(f"Error updating Identifi document {document_id}: {str(e)}")
-        return {"status": "error", "error": str(e)}
-
-@app.function_name(name="BulkSignatureValidation")
-@app.route(route="bulk-validate")
-def bulk_signature_validation(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Azure Function for bulk signature validation
-    """
-    logging.info('Bulk signature validation function processed a request.')
-    
-    try:
-        req_body = req.get_json()
-        document_batch = req_body.get('documents', [])
-        
-        if not document_batch:
-            return func.HttpResponse(
-                json.dumps({"error": "No documents provided in batch"}),
-                status_code=400,
-                mimetype="application/json"
-            )
-        
-        results = []
-        for document in document_batch:
+        # Extract taskId from request body for POST requests
+        task_id = "unknown"
+        if req.method == "POST":
             try:
-                # Process individual document
-                validation_result = process_signature_validation(
-                    document.get('document_id'),
-                    document.get('document_url'),
-                    document.get('document_type')
-                )
-                
-                # Update Identifi
-                update_result = update_identifi_document(
-                    document.get('document_id'),
-                    validation_result
-                )
-                
-                results.append({
-                    "document_id": document.get('document_id'),
-                    "status": "success",
-                    "validation_result": validation_result,
-                    "update_result": update_result
-                })
-                
-            except Exception as e:
-                results.append({
-                    "document_id": document.get('document_id'),
-                    "status": "error",
-                    "error": str(e)
-                })
+                req_body = await req.get_json()
+                task_id = req_body.get("taskId", "unknown")
+            except ValueError:
+                logger.warning("taskId=unknown: Failed to parse request body for taskId")
         
-        return func.HttpResponse(
-            json.dumps({
-                "status": "completed",
-                "total_documents": len(document_batch),
-                "results": results,
-                "timestamp": datetime.utcnow().isoformat()
-            }),
-            status_code=200,
-            mimetype="application/json"
-        )
-        
+        logger.info(f"taskId={task_id}: Received HTTP request: method={req.method}, url={req.url}, route={req.route_params.get('route', '')}")
+        response = await func.AsgiMiddleware(fastapi_app).handle_async(req)
+        logger.info(f"taskId={task_id}: HTTP response: status={response.status_code}, body={response.get_body().decode('utf-8')}")
+        return response
+    
     except Exception as e:
-        logging.error(f"Error processing bulk validation: {str(e)}")
+        error_message = get_error_message(e)
+        logger.error(f"taskId={task_id}: Error processing HTTP request: {error_message}")
         return func.HttpResponse(
-            json.dumps({"error": f"Bulk validation failed: {str(e)}"}),
-            status_code=500,
-            mimetype="application/json"
+            f"Error: {error_message}",
+            status_code=500
         )
+
+# Queue-triggered Azure Function
+@function_app.queue_trigger(
+    arg_name="msg",
+    queue_name="signature-validation",
+    connection="AzureWebJobsStorage"
+)
+async def queue_trigger(msg: func.QueueMessage) -> None:
+    task_id = "unknown"
+    try:
+        # Parse queue message
+        message_body = msg.get_body().decode('utf-8')
+        logger.info(f"taskId={task_id}: Received queue message: {message_body}")
+        
+        # Convert JSON message to SignatureValidationRequest
+        try:
+            message_data = json.loads(message_body)
+            task_id = message_data.get("taskId", "unknown")
+            # Skip completed messages to prevent infinite loops
+            if message_data.get("status") == "completed":
+                logger.info(f"taskId={task_id}: Skipping completed message")
+                return
+            request = SignatureValidationRequest(**message_data)
+        except (json.JSONDecodeError, ValueError) as e:
+            error_message = get_error_message(e)
+            logger.error(f"taskId={task_id}: Invalid queue message format: {error_message}")
+            # Send failed response
+            try:
+                queue_client = QueueClient.from_connection_string(
+                    conn_str=os.getenv("AzureWebJobsStorage"),
+                    queue_name="signature-validation"
+                )
+                response_message = {
+                    "taskId": task_id,
+                    "source": "Identifi Signature Validator",
+                    "status": "Failed",
+                    "message": error_message,
+                    "sourceFiles": 0,
+                    "stored": 0,
+                    "errored": 0,
+                    "unknown": 0
+                }
+                queue_client.send_message(json.dumps(response_message))
+                logger.info(f"taskId={task_id}: Sent failed response message to queue: {json.dumps(response_message)}")
+            except Exception as send_e:
+                error_message = get_error_message(send_e)
+                logger.error(f"taskId={task_id}: Failed to send failed message to queue: {error_message}")
+            return
+
+        # Process the request using the shared logic from main.py
+        results = await process_signature_validation(request)
+        logger.info(f"taskId={task_id}: Queue processing completed: results_count={len(results)}")
+
+        logger.info(f"taskId={task_id}: Results: {results}")
+        # Log results
+        for result in results:
+            logger.info(f"taskId={task_id}: Processed taskId={result.taskId}, status={result.status}, message={result.message}")
+
+        # Send results back to the queue
+        try:
+            queue_client = QueueClient.from_connection_string(
+                conn_str=os.getenv("AzureWebJobsStorage"),
+                queue_name="signature-validation"
+            )
+            for result in results:
+                response_message = {
+                    "taskId": result.taskId,
+                    "source": result.source,
+                    "status": result.status,
+                    "message": result.message,
+                    "sourceFiles": result.sourceFiles,
+                    "stored": result.stored,
+                    "errored": result.errored,
+                    "unknown": result.unknown
+                }
+                queue_client.send_message(json.dumps(response_message))
+                logger.info(f"taskId={task_id}: Sent response message to queue: {json.dumps(response_message)}")
+        except Exception as e:
+            error_message = get_error_message(e)
+            logger.error(f"taskId={task_id}: Failed to send message to queue: {error_message}")
+
+    except Exception as e:
+        error_message = get_error_message(e)
+        logger.error(f"taskId={task_id}: Error processing queue message: {error_message}")
+        # Send failed response if possible
+        try:
+            task_id = request.taskId if 'request' in locals() else message_data.get("taskId", "unknown") if 'message_data' in locals() else task_id
+            queue_client = QueueClient.from_connection_string(
+                conn_str=os.getenv("AzureWebJobsStorage"),
+                queue_name="signature-validation"
+            )
+            response_message = {
+                "taskId": task_id,
+                "source": "Identifi Signature Validator",
+                "status": "Failed",
+                "message": error_message,
+                "sourceFiles": 0,
+                "stored": 0,
+                "errored": 0,
+                "unknown": 0
+            }
+            queue_client.send_message(json.dumps(response_message))
+            logger.info(f"taskId={task_id}: Sent failed response message to queue: {json.dumps(response_message)}")
+        except Exception as send_e:
+            error_message = get_error_message(send_e)
+            logger.error(f"taskId={task_id}: Failed to send failed message to queue: {error_message}")

@@ -1,9 +1,12 @@
-FROM mcr.microsoft.com/azure-functions/python:4-python3.9
+FROM python:3.12-slim
 
-ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
-    AzureFunctionsJobHost__Logging__Console__IsEnabled=true
+WORKDIR /app
 
-COPY requirements.txt /
-RUN pip install -r requirements.txt
+COPY requirements.txt .
+RUN pip install "fastapi[all]" -r requirements.txt
 
-COPY . /home/site/wwwroot
+COPY src/ src/
+
+ENV PYTHONPATH=/app
+
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
