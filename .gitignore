@@ -6,6 +6,18 @@ __pycache__/
 # C extensions
 *.so
 
+# virtual environment
+.venv/
+
+.cursorignore
+.cursorindexingignore
+
+
+# local settings
+local.settings.json
+
+.vscode/
+
 # Distribution / packaging
 .Python
 build/
